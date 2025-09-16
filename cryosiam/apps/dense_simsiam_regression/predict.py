@@ -1,10 +1,16 @@
+import torch
+import numpy as np
+import numpy.core.multiarray as np_multi
+from torch.serialization import add_safe_globals
+import collections
+
+add_safe_globals([np.dtype, np_multi._reconstruct, np_multi.scalar])
+
 import os
 import yaml
 import h5py
-import torch
-import numpy as np
 from torch.utils.data import DataLoader
-from monai.data import Dataset, list_data_collate, GridPatchDataset, ITKReader, ITKWriter
+from monai.data import Dataset, list_data_collate, GridPatchDataset, ITKReader
 from monai.transforms import (
     Compose,
     LoadImaged,
@@ -18,10 +24,11 @@ from monai.transforms import (
 
 from cryosiam.utils import parser_helper
 from cryosiam.data import MrcReader, TiffReader, PatchIter, MrcWriter, TiffWriter
-from cryosiam.apps.dense_simsiam_regression import load_backbone_model, load_prediction_model
+from cryosiam.apps.dense_simsiam_regression.utils import load_backbone_model, load_prediction_model
 
 
 def main(config_file_path):
+
     with open(config_file_path, "r") as ymlfile:
         cfg = yaml.safe_load(ymlfile)
 
@@ -32,7 +39,7 @@ def main(config_file_path):
     backbone = load_backbone_model(checkpoint_path)
     prediction_model = load_prediction_model(checkpoint_path)
 
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
     net_config = checkpoint['hyper_parameters']['config']
 
     test_folder = cfg['data_folder']
@@ -41,13 +48,26 @@ def main(config_file_path):
     patch_size = net_config['parameters']['data']['patch_size']
     spatial_dims = net_config['parameters']['network']['spatial_dims']
     os.makedirs(prediction_folder, exist_ok=True)
+
     files = cfg['test_files']
     if files is None:
         files = [x for x in os.listdir(test_folder) if os.path.isfile(os.path.join(test_folder, x))]
+
+    input_files = [f for f in files if f.endswith(cfg['file_extension'])]
     test_data = []
-    for idx, file in enumerate(files):
-        test_data.append({'image': os.path.join(test_folder, file),
-                          'file_name': os.path.join(test_folder, file)})
+
+    for f in input_files:
+        pred_file = os.path.join(prediction_folder, f.replace(cfg['file_extension'], '_preds.h5'))
+        if not os.path.exists(pred_file):
+            test_data.append({
+                'image': os.path.join(test_folder, f),
+                'file_name': os.path.join(test_folder, f)
+            })
+
+    print(f"Total input files: {len(input_files)}")
+    print(f"Already denoised files: {len(input_files) - len(test_data)}")
+    print(f"Files to process: {len(test_data)}")
+
     reader = MrcReader(read_in_mem=True) if cfg['file_extension'] in ['.mrc', '.rec'] else \
         TiffReader() if cfg['file_extension'] in ['.tiff', '.tif'] else ITKReader()
 
@@ -84,6 +104,7 @@ def main(config_file_path):
     with torch.no_grad():
         for i, test_sample in enumerate(test_loader):
             out_file = os.path.join(prediction_folder, os.path.basename(test_sample['file_name'][0]))
+            print('Processing file:', test_sample['file_name'][0])
             patch_dataset = GridPatchDataset(data=[test_sample['image'][0]],
                                              patch_iter=patch_iter)
             input_size = list(test_sample['image'][0][0].shape)
